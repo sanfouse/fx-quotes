@@ -1,0 +1,59 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: fx_quotes
+      POSTGRES_PASSWORD: fx_quotes
+      POSTGRES_DB: fx_quotes
+    ports:
+      - "127.0.0.1:15432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "fx_quotes", "-d", "fx_quotes"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  migrate:
+    image: kukymbr/goose-docker:3.27.1
+    user: "65534:65534"
+    environment:
+      GOOSE_DRIVER: postgres
+      GOOSE_DBSTRING: postgres://fx_quotes:fx_quotes@postgres:5432/fx_quotes?sslmode=disable
+    volumes:
+      - ./sql/migrations:/migrations:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  app:
+    build: .
+    environment:
+      DATABASE_URL: postgres://fx_quotes:fx_quotes@postgres:5432/fx_quotes?sslmode=disable
+      DATABASE_PING_TIMEOUT: "${DATABASE_PING_TIMEOUT:-5s}"
+      HTTP_PORT: "${HTTP_PORT:-3000}"
+      HTTP_READ_HEADER_TIMEOUT: "${HTTP_READ_HEADER_TIMEOUT:-5s}"
+      HTTP_READ_TIMEOUT: "${HTTP_READ_TIMEOUT:-5s}"
+      HTTP_WRITE_TIMEOUT: "${HTTP_WRITE_TIMEOUT:-5s}"
+      HTTP_IDLE_TIMEOUT: "${HTTP_IDLE_TIMEOUT:-60s}"
+      HTTP_SHUTDOWN_TIMEOUT: "${HTTP_SHUTDOWN_TIMEOUT:-5s}"
+      HTTP_REQUEST_TIMEOUT: "${HTTP_REQUEST_TIMEOUT:-3s}"
+      HTTP_MAX_BODY_BYTES: "${HTTP_MAX_BODY_BYTES:-4096}"
+      HTTP_MAX_IDEMPOTENCY_KEY_BYTES: "${HTTP_MAX_IDEMPOTENCY_KEY_BYTES:-128}"
+      RATES_BASE_URL: "${RATES_BASE_URL:-https://api.frankfurter.dev}"
+      RATES_REQUEST_TIMEOUT: "${RATES_REQUEST_TIMEOUT:-5s}"
+      RATES_MAX_ATTEMPTS: "${RATES_MAX_ATTEMPTS:-3}"
+      RATES_RETRY_DELAY: "${RATES_RETRY_DELAY:-250ms}"
+      RATES_MAX_BODY_BYTES: "${RATES_MAX_BODY_BYTES:-4096}"
+      WORKER_ATTEMPT_TIMEOUT: "${WORKER_ATTEMPT_TIMEOUT:-20s}"
+      WORKER_LEASE: "${WORKER_LEASE:-30s}"
+      WORKER_POLL_INTERVAL: "${WORKER_POLL_INTERVAL:-500ms}"
+    ports:
+      - "127.0.0.1:${HTTP_PORT:-3000}:${HTTP_PORT:-3000}"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  postgres_data:

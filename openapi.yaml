@@ -1,0 +1,228 @@
+openapi: 3.1.0
+info:
+  title: FX Quotes
+  version: 1.0.0
+  description: Асинхронное обновление дневных справочных курсов валют.
+servers:
+  - url: http://localhost:3000
+    description: Локальный запуск.
+  - url: https://82.38.71.115
+    description: Тестовый стенд с ограничением частоты запросов через nginx.
+security: []
+paths:
+  /quotes:
+    post:
+      operationId: enqueueQuote
+      summary: Поставить обновление котировки в очередь
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: false
+          description: Необязательный ключ длиной до HTTP_MAX_IDEMPOTENCY_KEY_BYTES байт в UTF-8 (по умолчанию 128). Без ключа или с пустым значением создаётся новое обновление. Непустой ключ только из пробельных символов даёт 400. Повтор с той же парой возвращает исходный ID независимо от статуса задачи; с другой парой — 409.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pair]
+              properties:
+                pair:
+                  $ref: '#/components/schemas/CurrencyPair'
+            example: {pair: EUR/MXN}
+      responses:
+        '202':
+          description: Обновление принято или найдено по ключу идемпотентности.
+          headers:
+            Location:
+              description: Путь для получения статуса и результата обновления.
+              schema:
+                type: string
+              example: /quotes/123
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id]
+                properties:
+                  id:
+                    $ref: '#/components/schemas/QuoteID'
+              example: {id: 123}
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '409':
+          description: Ключ идемпотентности уже использован с другой парой.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example: {error: idempotency_conflict}
+        '413':
+          description: Тело запроса превышает HTTP_MAX_BODY_BYTES (по умолчанию 4096 байт). При локальном запуске возвращается JSON; nginx на тестовом стенде может вернуть HTML.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example: {error: Request Entity Too Large}
+            text/html:
+              schema:
+                type: string
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /quotes/{id}:
+    get:
+      operationId: getQuote
+      summary: Получить статус и результат по ID обновления
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            $ref: '#/components/schemas/QuoteID'
+      responses:
+        '200':
+          description: Обновление завершилось успешно или с ошибкой поставщика.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/CompletedQuote'
+                  - $ref: '#/components/schemas/FailedQuote'
+        '202':
+          description: Обновление ожидает или выполняется.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PendingQuote'
+              example: {id: 123, pair: EUR/MXN, status: pending}
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /quotes/latest:
+    get:
+      operationId: getLatestQuote
+      summary: Получить последнюю успешную котировку по валютной паре
+      parameters:
+        - in: query
+          name: pair
+          required: true
+          schema:
+            $ref: '#/components/schemas/CurrencyPair'
+      responses:
+        '200':
+          description: Последнее успешное обновление.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompletedQuote'
+              example: {id: 123, pair: EUR/MXN, status: completed, price: 20.957, updated_at: '2026-11-05T12:00:00Z'}
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+components:
+  schemas:
+    CurrencyPair:
+      type: string
+      description: Допустимы EUR/MXN, EUR/USD, MXN/EUR, MXN/USD, USD/EUR и USD/MXN. Регистр и внешние пробелы игнорируются.
+      examples: [EUR/MXN, ' eur/usd ']
+    QuoteID:
+      type: integer
+      format: int64
+      minimum: 1
+      maximum: 9223372036854775807
+    QuoteIdentity:
+      type: object
+      required: [id, pair]
+      properties:
+        id:
+          $ref: '#/components/schemas/QuoteID'
+        pair:
+          type: string
+          enum: [EUR/MXN, EUR/USD, MXN/EUR, MXN/USD, USD/EUR, USD/MXN]
+    PendingQuote:
+      allOf:
+        - $ref: '#/components/schemas/QuoteIdentity'
+        - type: object
+          required: [status]
+          properties:
+            status:
+              type: string
+              const: pending
+    CompletedQuote:
+      allOf:
+        - $ref: '#/components/schemas/QuoteIdentity'
+        - type: object
+          required: [status, price, updated_at]
+          properties:
+            status:
+              type: string
+              const: completed
+            price:
+              type: number
+              exclusiveMinimum: 0
+              description: Количество единиц второй валюты за одну единицу первой.
+            updated_at:
+              type: string
+              format: date-time
+              description: Время сохранения результата сервисом в UTC.
+    FailedQuote:
+      allOf:
+        - $ref: '#/components/schemas/QuoteIdentity'
+        - type: object
+          required: [status, error]
+          properties:
+            status:
+              type: string
+              const: failed
+            error:
+              type: string
+              const: rate_unavailable
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+  responses:
+    RateLimited:
+      description: Превышен лимит запросов nginx на тестовом стенде. При локальном запуске через Docker этот лимит не применяется.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {error: rate_limited}
+    InvalidRequest:
+      description: Некорректный JSON, ID, валютная пара или ключ идемпотентности.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {error: invalid_request}
+    NotFound:
+      description: ID или последняя успешная котировка отсутствуют.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {error: not_found}
+    InternalError:
+      description: Внутренняя ошибка сервиса.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {error: internal_error}

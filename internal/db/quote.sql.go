@@ -1,0 +1,155 @@
+package db
+
+import (
+	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
+)
+
+const claimNextQuote = `-- name: ClaimNextQuote :one
+WITH next AS (
+    SELECT id FROM quotes
+    WHERE status = 'pending'
+      AND (lease_until IS NULL OR lease_until <= clock_timestamp())
+    ORDER BY id
+    LIMIT 1
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE quotes AS q
+SET claim_version = q.claim_version + 1,
+    lease_until = clock_timestamp() + $1::bigint * interval '1 microsecond'
+FROM next
+WHERE q.id = next.id
+RETURNING q.id, q.pair, q.claim_version
+`
+
+type ClaimNextQuoteRow struct {
+	ID           int64
+	Pair         string
+	ClaimVersion int64
+}
+
+func (q *Queries) ClaimNextQuote(ctx context.Context, leaseMicroseconds int64) (ClaimNextQuoteRow, error) {
+	row := q.db.QueryRow(ctx, claimNextQuote, leaseMicroseconds)
+	var i ClaimNextQuoteRow
+	err := row.Scan(&i.ID, &i.Pair, &i.ClaimVersion)
+	return i, err
+}
+
+const completeQuote = `-- name: CompleteQuote :execrows
+UPDATE quotes
+SET status = 'completed', price = $2, updated_at = clock_timestamp(), lease_until = NULL
+WHERE id = $1 AND claim_version = $3 AND status = 'pending'
+  AND lease_until > clock_timestamp()
+`
+
+type CompleteQuoteParams struct {
+	ID           int64
+	Price        pgtype.Float8
+	ClaimVersion int64
+}
+
+func (q *Queries) CompleteQuote(ctx context.Context, arg CompleteQuoteParams) (int64, error) {
+	result, err := q.db.Exec(ctx, completeQuote, arg.ID, arg.Price, arg.ClaimVersion)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const enqueueQuote = `-- name: EnqueueQuote :one
+INSERT INTO quotes (pair, idempotency_key)
+VALUES ($1, $2)
+ON CONFLICT (idempotency_key) DO NOTHING
+RETURNING id
+`
+
+type EnqueueQuoteParams struct {
+	Pair           string
+	IdempotencyKey pgtype.Text
+}
+
+func (q *Queries) EnqueueQuote(ctx context.Context, arg EnqueueQuoteParams) (int64, error) {
+	row := q.db.QueryRow(ctx, enqueueQuote, arg.Pair, arg.IdempotencyKey)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
+const failQuote = `-- name: FailQuote :execrows
+UPDATE quotes SET status = 'failed', lease_until = NULL
+WHERE id = $1 AND claim_version = $2 AND status = 'pending'
+  AND lease_until > clock_timestamp()
+`
+
+type FailQuoteParams struct {
+	ID           int64
+	ClaimVersion int64
+}
+
+func (q *Queries) FailQuote(ctx context.Context, arg FailQuoteParams) (int64, error) {
+	result, err := q.db.Exec(ctx, failQuote, arg.ID, arg.ClaimVersion)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const getLatestQuote = `-- name: GetLatestQuote :one
+SELECT id, pair, idempotency_key, status, price, updated_at, claim_version, lease_until FROM quotes
+WHERE pair = $1 AND status = 'completed'
+ORDER BY updated_at DESC, id DESC
+LIMIT 1
+`
+
+func (q *Queries) GetLatestQuote(ctx context.Context, pair string) (Quote, error) {
+	row := q.db.QueryRow(ctx, getLatestQuote, pair)
+	var i Quote
+	err := row.Scan(
+		&i.ID,
+		&i.Pair,
+		&i.IdempotencyKey,
+		&i.Status,
+		&i.Price,
+		&i.UpdatedAt,
+		&i.ClaimVersion,
+		&i.LeaseUntil,
+	)
+	return i, err
+}
+
+const getQuote = `-- name: GetQuote :one
+SELECT id, pair, idempotency_key, status, price, updated_at, claim_version, lease_until FROM quotes WHERE id = $1
+`
+
+func (q *Queries) GetQuote(ctx context.Context, id int64) (Quote, error) {
+	row := q.db.QueryRow(ctx, getQuote, id)
+	var i Quote
+	err := row.Scan(
+		&i.ID,
+		&i.Pair,
+		&i.IdempotencyKey,
+		&i.Status,
+		&i.Price,
+		&i.UpdatedAt,
+		&i.ClaimVersion,
+		&i.LeaseUntil,
+	)
+	return i, err
+}
+
+const getQuoteByKey = `-- name: GetQuoteByKey :one
+SELECT id, pair FROM quotes WHERE idempotency_key = $1
+`
+
+type GetQuoteByKeyRow struct {
+	ID   int64
+	Pair string
+}
+
+func (q *Queries) GetQuoteByKey(ctx context.Context, idempotencyKey pgtype.Text) (GetQuoteByKeyRow, error) {
+	row := q.db.QueryRow(ctx, getQuoteByKey, idempotencyKey)
+	var i GetQuoteByKeyRow
+	err := row.Scan(&i.ID, &i.Pair)
+	return i, err
+}

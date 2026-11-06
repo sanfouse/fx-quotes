@@ -1,0 +1,41 @@
+name: Deploy FX Quotes
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fx-quotes-production
+  cancel-in-progress: false
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Build application image
+        run: docker build -t "fx-quotes-deploy:$GITHUB_SHA" .
+      - name: Send image to VPS
+        shell: bash
+        env:
+          DEPLOY_KEY: ${{ secrets.FX_DEPLOY_KEY }}
+          KNOWN_HOSTS: ${{ vars.FX_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key="$RUNNER_TEMP/fx-deploy-key"
+          known_hosts="$RUNNER_TEMP/fx-known-hosts"
+          printf '%s\n' "$DEPLOY_KEY" > "$key"
+          printf '%s\n' "$KNOWN_HOSTS" > "$known_hosts"
+          docker save "fx-quotes-deploy:$GITHUB_SHA" | gzip -1 | \
+            ssh -T -i "$key" -o BatchMode=yes -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$known_hosts" \
+              root@82.38.71.115 "deploy $GITHUB_SHA"

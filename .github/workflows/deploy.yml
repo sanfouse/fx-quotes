@@ -1,4 +1,4 @@
-name: Deploy FX Quotes
+name: Deploy
 
 on:
   workflow_dispatch:

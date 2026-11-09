@@ -10,13 +10,12 @@ import (
 
 type HTTPConfig struct {
 	Port                   int           `env:"PORT" envDefault:"3000"`
-	ReadHeaderTimeout      time.Duration `env:"READ_HEADER_TIMEOUT" envDefault:"5s"`
 	ReadTimeout            time.Duration `env:"READ_TIMEOUT" envDefault:"5s"`
 	WriteTimeout           time.Duration `env:"WRITE_TIMEOUT" envDefault:"5s"`
 	IdleTimeout            time.Duration `env:"IDLE_TIMEOUT" envDefault:"60s"`
 	ShutdownTimeout        time.Duration `env:"SHUTDOWN_TIMEOUT" envDefault:"5s"`
 	RequestTimeout         time.Duration `env:"REQUEST_TIMEOUT" envDefault:"3s"`
-	MaxBodyBytes           int64         `env:"MAX_BODY_BYTES" envDefault:"4096"`
+	MaxBodyBytes           int           `env:"MAX_BODY_BYTES" envDefault:"4096"`
 	MaxIdempotencyKeyBytes int           `env:"MAX_IDEMPOTENCY_KEY_BYTES" envDefault:"128"`
 }
 
@@ -55,7 +54,7 @@ func Load() (Config, error) {
 		return Config{}, errors.New("DATABASE_URL is required")
 	}
 	for _, duration := range []time.Duration{
-		cfg.DatabasePingTimeout, cfg.HTTP.ReadHeaderTimeout, cfg.HTTP.ReadTimeout,
+		cfg.DatabasePingTimeout, cfg.HTTP.ReadTimeout,
 		cfg.HTTP.WriteTimeout, cfg.HTTP.IdleTimeout, cfg.HTTP.ShutdownTimeout,
 		cfg.HTTP.RequestTimeout, cfg.Rates.Timeout, cfg.Rates.RetryDelay,
 		cfg.Worker.AttemptTimeout, cfg.Worker.PollInterval,
@@ -67,7 +66,7 @@ func Load() (Config, error) {
 	if cfg.HTTP.Port < 1 || cfg.HTTP.Port > 65535 {
 		return Config{}, errors.New("HTTP_PORT must be between 1 and 65535")
 	}
-	for _, size := range []int64{cfg.HTTP.MaxBodyBytes, cfg.Rates.MaxBodyBytes} {
+	for _, size := range []int64{int64(cfg.HTTP.MaxBodyBytes), cfg.Rates.MaxBodyBytes} {
 		if size <= 0 || size == math.MaxInt64 {
 			return Config{}, errors.New("HTTP_MAX_BODY_BYTES and RATES_MAX_BODY_BYTES must be positive and below MaxInt64")
 		}

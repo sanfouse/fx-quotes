@@ -33,7 +33,6 @@ services:
       DATABASE_URL: postgres://fx_quotes:fx_quotes@postgres:5432/fx_quotes?sslmode=disable
       DATABASE_PING_TIMEOUT: "${DATABASE_PING_TIMEOUT:-5s}"
       HTTP_PORT: "${HTTP_PORT:-3000}"
-      HTTP_READ_HEADER_TIMEOUT: "${HTTP_READ_HEADER_TIMEOUT:-5s}"
       HTTP_READ_TIMEOUT: "${HTTP_READ_TIMEOUT:-5s}"
       HTTP_WRITE_TIMEOUT: "${HTTP_WRITE_TIMEOUT:-5s}"
       HTTP_IDLE_TIMEOUT: "${HTTP_IDLE_TIMEOUT:-60s}"

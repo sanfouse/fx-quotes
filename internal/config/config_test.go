@@ -78,8 +78,8 @@ func TestSettingsOverrides(t *testing.T) {
 	resetEnv(t)
 	for key, value := range map[string]string{
 		"DATABASE_PING_TIMEOUT": "2s",
-		"HTTP_PORT":             "4000", "HTTP_READ_HEADER_TIMEOUT": "1s",
-		"HTTP_READ_TIMEOUT": "7s", "HTTP_WRITE_TIMEOUT": "9s",
+		"HTTP_PORT":             "4000",
+		"HTTP_READ_TIMEOUT":     "7s", "HTTP_WRITE_TIMEOUT": "9s",
 		"HTTP_IDLE_TIMEOUT": "45s", "HTTP_SHUTDOWN_TIMEOUT": "4s",
 		"HTTP_REQUEST_TIMEOUT": "6s", "HTTP_MAX_BODY_BYTES": "8192",
 		"HTTP_MAX_IDEMPOTENCY_KEY_BYTES": "64",
@@ -96,7 +96,7 @@ func TestSettingsOverrides(t *testing.T) {
 	want := Config{
 		DatabaseURL: "postgres://localhost/fx_quotes", DatabasePingTimeout: 2 * time.Second,
 		HTTP: HTTPConfig{
-			Port: 4000, ReadHeaderTimeout: time.Second, ReadTimeout: 7 * time.Second,
+			Port: 4000, ReadTimeout: 7 * time.Second,
 			WriteTimeout: 9 * time.Second, IdleTimeout: 45 * time.Second,
 			ShutdownTimeout: 4 * time.Second, RequestTimeout: 6 * time.Second,
 			MaxBodyBytes: 8192, MaxIdempotencyKeyBytes: 64,

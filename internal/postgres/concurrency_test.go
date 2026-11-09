@@ -81,12 +81,16 @@ func TestConcurrentUpdates(t *testing.T) {
 				req := httptest.NewRequest(http.MethodPost, "/quotes", strings.NewReader(`{"pair":"EUR/MXN"}`))
 				req.Header.Set("Content-Type", "application/json")
 				req.Header.Set("Idempotency-Key", "concurrency-key")
-				recorder := httptest.NewRecorder()
-				app.ServeHTTP(recorder, req)
+				resp, err := app.Test(req)
+				if err != nil {
+					results <- result{err: err}
+					return
+				}
+				defer func() { _ = resp.Body.Close() }()
 				var reference dto.QuoteReference
-				err := json.Unmarshal(recorder.Body.Bytes(), &reference)
-				if recorder.Code != http.StatusAccepted {
-					err = fmt.Errorf("HTTP %d: %s", recorder.Code, recorder.Body.String())
+				err = json.NewDecoder(resp.Body).Decode(&reference)
+				if resp.StatusCode != http.StatusAccepted {
+					err = fmt.Errorf("HTTP %d", resp.StatusCode)
 				}
 				results <- result{reference.ID, err}
 			}()

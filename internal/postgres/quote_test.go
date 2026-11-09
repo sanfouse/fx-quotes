@@ -22,6 +22,7 @@ import (
 	"fx-quotes/internal/postgres"
 	"fx-quotes/internal/service"
 
+	"github.com/gofiber/fiber/v3"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -173,16 +174,17 @@ func TestQuoteFlow(t *testing.T) {
 	}
 }
 
-func requestQuote(t *testing.T, app http.Handler, method, path, body, key string, status int) dto.QuoteResponse {
+func requestQuote(t *testing.T, app *fiber.App, method, path, body, key string, status int) dto.QuoteResponse {
 	t.Helper()
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	if method == http.MethodPost {
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Idempotency-Key", key)
 	}
-	recorder := httptest.NewRecorder()
-	app.ServeHTTP(recorder, req)
-	resp := recorder.Result()
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer func() { _ = resp.Body.Close() }()
 	var result dto.QuoteResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {

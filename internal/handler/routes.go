@@ -2,40 +2,60 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"log/slog"
-	"net/http"
 	"time"
+
+	"fx-quotes/internal/domain"
+
+	"github.com/gofiber/fiber/v3"
+	"github.com/gofiber/fiber/v3/middleware/recover"
 )
 
-func (h *QuoteHandler) Routes() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/quotes", onlyMethod(h.enqueue, http.MethodPost))
-	mux.HandleFunc("/quotes/latest", onlyMethod(h.getLatest, http.MethodGet))
-	mux.HandleFunc("/quotes/{id}", onlyMethod(h.getByID, http.MethodGet))
-	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		writeError(w, http.StatusNotFound, http.StatusText(http.StatusNotFound))
+func (h *QuoteHandler) Routes() *fiber.App {
+	app := fiber.New(fiber.Config{
+		BodyLimit:               h.settings.MaxBodyBytes,
+		ReadTimeout:             h.settings.ReadTimeout,
+		WriteTimeout:            h.settings.WriteTimeout,
+		IdleTimeout:             h.settings.IdleTimeout,
+		CaseSensitive:           true,
+		StrictRouting:           true,
+		DisableHeadAutoRegister: true,
+		ErrorHandler:            writeError,
 	})
-
-	return http.MaxBytesHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	app.Use(func(c fiber.Ctx) error {
 		started := time.Now()
-		requestPath := r.URL.EscapedPath()
-		ctx, cancel := context.WithTimeout(r.Context(), h.settings.RequestTimeout)
+		ctx, cancel := context.WithTimeout(c.Context(), h.settings.RequestTimeout)
 		defer cancel()
-		r = r.WithContext(ctx)
+		c.SetContext(ctx)
 
-		mux.ServeHTTP(w, r)
-		slog.InfoContext(ctx, "http request", "method", r.Method, "path", requestPath,
+		err := c.Next()
+		slog.InfoContext(ctx, "http request", "method", c.Method(), "path", c.Path(),
 			"duration", time.Since(started))
-	}), h.settings.MaxBodyBytes)
+		return err
+	})
+	app.Use(recover.New())
+	app.Post("/quotes", h.enqueue)
+	app.Get("/quotes/latest", h.getLatest)
+	app.Get("/quotes/:id", h.getByID)
+	return app
 }
 
-func onlyMethod(next http.HandlerFunc, method string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != method {
-			w.Header().Set("Allow", method)
-			writeError(w, http.StatusMethodNotAllowed, http.StatusText(http.StatusMethodNotAllowed))
-			return
+func writeError(c fiber.Ctx, err error) error {
+	status, message := fiber.StatusInternalServerError, "internal_error"
+	switch {
+	case errors.Is(err, domain.ErrInvalidPair):
+		status, message = fiber.StatusBadRequest, "invalid_request"
+	case errors.Is(err, domain.ErrQuoteNotFound):
+		status, message = fiber.StatusNotFound, "not_found"
+	case errors.Is(err, domain.ErrIdempotencyConflict):
+		status, message = fiber.StatusConflict, "idempotency_conflict"
+	default:
+		if e, ok := errors.AsType[*fiber.Error](err); ok {
+			status, message = e.Code, e.Message
+		} else {
+			slog.ErrorContext(c.Context(), "serve request", "method", c.Method(), "path", c.Path(), "error", err)
 		}
-		next(w, r)
 	}
+	return c.Status(status).JSON(fiber.Map{"error": message})
 }

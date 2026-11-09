@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -17,6 +16,7 @@ import (
 	"fx-quotes/internal/postgres"
 	"fx-quotes/internal/service"
 
+	"github.com/gofiber/fiber/v3"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -52,34 +52,27 @@ func run(ctx context.Context) error {
 	rates := frankfurter.NewClient(&http.Client{Timeout: cfg.Rates.Timeout}, cfg.Rates)
 	worker := service.NewQuoteWorker(quotes, rates, cfg.Worker)
 
-	server := &http.Server{
-		Addr:              fmt.Sprintf(":%d", cfg.HTTP.Port),
-		Handler:           handler.NewQuoteHandler(quoteService, cfg.HTTP).Routes(),
-		ReadHeaderTimeout: cfg.HTTP.ReadHeaderTimeout,
-		ReadTimeout:       cfg.HTTP.ReadTimeout,
-		WriteTimeout:      cfg.HTTP.WriteTimeout,
-		IdleTimeout:       cfg.HTTP.IdleTimeout,
-	}
-
-	runCtx, stop := context.WithCancel(ctx)
-	var running sync.WaitGroup
-	running.Go(func() { worker.Run(runCtx) })
-	running.Go(func() {
-		<-runCtx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.HTTP.ShutdownTimeout)
-		defer cancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
+	app := handler.NewQuoteHandler(quoteService, cfg.HTTP).Routes()
+	app.Hooks().OnPostShutdown(func(err error) error {
+		if err != nil {
 			slog.Error("shut down HTTP server", "error", err)
-			_ = server.Close()
 		}
+		return nil
 	})
 
-	slog.Info("start HTTP server", "addr", server.Addr)
-	err = server.ListenAndServe()
+	runCtx, stop := context.WithCancel(ctx)
+	defer stop()
+	var running sync.WaitGroup
+	running.Go(func() { worker.Run(runCtx) })
+
+	addr := fmt.Sprintf(":%d", cfg.HTTP.Port)
+	slog.Info("start HTTP server", "addr", addr)
+	err = app.Listen(addr, fiber.ListenConfig{
+		GracefulContext:       runCtx,
+		ShutdownTimeout:       cfg.HTTP.ShutdownTimeout,
+		DisableStartupMessage: true,
+	})
 	stop()
 	running.Wait()
-	if errors.Is(err, http.ErrServerClosed) {
-		return nil
-	}
 	return err
 }

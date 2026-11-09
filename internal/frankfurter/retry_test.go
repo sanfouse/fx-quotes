@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"fx-quotes/internal/config"
+
+	"github.com/stretchr/testify/assert"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -45,12 +47,9 @@ func TestRetryPreservesCause(t *testing.T) {
 					return tt.transport(req)
 				})}
 				rates := NewClient(client, config.Defaults().Rates)
-				if _, err := rates.GetRate(t.Context(), "EUR/MXN"); !errors.Is(err, cause) {
-					t.Fatalf("got %v, want original error %v", err, cause)
-				}
-				if calls != 3 {
-					t.Fatalf("got %d requests, want 3", calls)
-				}
+				_, err := rates.GetRate(t.Context(), "EUR/MXN")
+				assert.ErrorIs(t, err, cause)
+				assert.Equal(t, 3, calls, "upstream requests")
 			})
 		})
 	}
@@ -65,12 +64,9 @@ func TestRetryCanceledBeforeRequest(t *testing.T) {
 		return nil, errors.New("unexpected request")
 	})}
 	rates := NewClient(client, config.Defaults().Rates)
-	if _, err := rates.GetRate(ctx, "EUR/MXN"); !errors.Is(err, context.Canceled) {
-		t.Fatalf("got %v, want context canceled", err)
-	}
-	if calls != 0 {
-		t.Fatalf("got %d requests for canceled context, want 0", calls)
-	}
+	_, err := rates.GetRate(ctx, "EUR/MXN")
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Zero(t, calls, "requests for canceled context")
 }
 
 func TestRetryCanceledDuringDelay(t *testing.T) {
@@ -90,12 +86,8 @@ func TestRetryCanceledDuringDelay(t *testing.T) {
 		}()
 		synctest.Wait()
 		cancel()
-		if err := <-done; !errors.Is(err, context.Canceled) {
-			t.Fatalf("got %v, want context canceled", err)
-		}
-		if got := calls.Load(); got != 1 {
-			t.Fatalf("got %d requests after canceling retry delay, want 1", got)
-		}
+		assert.ErrorIs(t, <-done, context.Canceled)
+		assert.Equal(t, int32(1), calls.Load(), "requests after canceling retry delay")
 	})
 }
 
@@ -110,11 +102,9 @@ func TestConfiguredRetries(t *testing.T) {
 			return nil, errors.New("connection lost")
 		})}
 		started := time.Now()
-		if _, err := NewClient(client, settings).GetRate(t.Context(), "EUR/MXN"); err == nil {
-			t.Fatal("expected provider error")
-		}
-		if calls != settings.MaxAttempts || time.Since(started) != settings.RetryDelay {
-			t.Fatalf("calls=%d, elapsed=%s", calls, time.Since(started))
-		}
+		_, err := NewClient(client, settings).GetRate(t.Context(), "EUR/MXN")
+		assert.Error(t, err)
+		assert.Equal(t, settings.MaxAttempts, calls)
+		assert.Equal(t, settings.RetryDelay, time.Since(started))
 	})
 }

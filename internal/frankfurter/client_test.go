@@ -2,7 +2,6 @@ package frankfurter
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,11 +11,14 @@ import (
 	"time"
 
 	"fx-quotes/internal/config"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestGetRateWithRetry(t *testing.T) {
 	const validRate = `{"date":"2026-11-05","base":"EUR","quote":"MXN","rate":20.95}`
-	cases := []struct {
+	tests := []struct {
 		name     string
 		statuses []int
 		body     string
@@ -32,34 +34,34 @@ func TestGetRateWithRetry(t *testing.T) {
 		{name: "large response", statuses: []int{200}, body: strings.Repeat(" ", 4097)},
 	}
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			var calls atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodGet || r.URL.Path != "/provider/v2/rate/EUR/MXN" {
-					t.Errorf("unexpected upstream request: %s %s", r.Method, r.URL.Path)
-				}
+				assert.Equal(t, http.MethodGet, r.Method)
+				assert.Equal(t, "/provider/v2/rate/EUR/MXN", r.URL.Path)
 				attempt := int(calls.Add(1))
-				status := tc.statuses[min(attempt, len(tc.statuses))-1]
+				status := tt.statuses[min(attempt, len(tt.statuses))-1]
 				w.WriteHeader(status)
 				if status != http.StatusOK {
 					return
 				}
-				if _, err := io.WriteString(w, tc.body); err != nil {
-					t.Errorf("write test response: %v", err)
-				}
+				_, err := io.WriteString(w, tt.body)
+				assert.NoError(t, err)
 			}))
 			defer server.Close()
 			settings := config.Defaults().Rates
 			settings.BaseURL = server.URL + "/provider/"
 			rates := NewClient(server.Client(), settings)
+
 			got, err := rates.GetRate(t.Context(), "EUR/MXN")
-			if got != tc.want || (err != nil) != (tc.want == 0) {
-				t.Errorf("got rate %v, error %v, want rate %v", got, err, tc.want)
+			if tt.want == 0 {
+				assert.Error(t, err)
+			} else {
+				require.NoError(t, err)
 			}
-			if got := int(calls.Load()); got != len(tc.statuses) {
-				t.Errorf("got %d upstream requests, want %d", got, len(tc.statuses))
-			}
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, int32(len(tt.statuses)), calls.Load(), "upstream requests")
 		})
 	}
 }
@@ -76,10 +78,7 @@ func TestGetRateTimeout(t *testing.T) {
 	settings := config.Defaults().Rates
 	settings.BaseURL = server.URL
 	rates := NewClient(httpClient, settings)
-	if _, err := rates.GetRate(t.Context(), "EUR/MXN"); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("got %v, want deadline exceeded", err)
-	}
-	if got := calls.Load(); got != 3 {
-		t.Errorf("got %d upstream requests, want 3", got)
-	}
+	_, err := rates.GetRate(t.Context(), "EUR/MXN")
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Equal(t, int32(3), calls.Load(), "upstream requests")
 }

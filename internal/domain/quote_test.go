@@ -1,26 +1,33 @@
 package domain
 
 import (
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNormalizePair(t *testing.T) {
 	for _, pair := range []string{"EUR/MXN", "EUR/USD", "MXN/EUR", "MXN/USD", "USD/EUR", "USD/MXN"} {
-		got, err := NormalizePair(pair)
-		if err != nil || got != pair {
-			t.Errorf("NormalizePair(%q) = %q, %v", pair, got, err)
-		}
+		t.Run(pair, func(t *testing.T) {
+			got, err := NormalizePair(pair)
+			require.NoError(t, err)
+			assert.Equal(t, pair, got)
+		})
 	}
 
-	got, err := NormalizePair(" eur/mxn ")
-	if err != nil || got != "EUR/MXN" {
-		t.Errorf("NormalizePair(%q) = %q, %v", " eur/mxn ", got, err)
-	}
+	t.Run("trim and uppercase", func(t *testing.T) {
+		got, err := NormalizePair(" eur/mxn ")
+		require.NoError(t, err)
+		assert.Equal(t, "EUR/MXN", got)
+	})
+}
 
+func TestNormalizePairInvalid(t *testing.T) {
 	for _, pair := range []string{"", "EUR", "EUR/EUR", "EUR/GBP", "EUR /MXN", "EUR/MXN/USD"} {
-		if _, err := NormalizePair(pair); !errors.Is(err, ErrInvalidPair) {
-			t.Errorf("NormalizePair(%q) returned %v, want ErrInvalidPair", pair, err)
-		}
+		t.Run(pair, func(t *testing.T) {
+			_, err := NormalizePair(pair)
+			assert.ErrorIs(t, err, ErrInvalidPair)
+		})
 	}
 }

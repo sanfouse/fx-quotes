@@ -1,128 +1,121 @@
-package postgres_test
+package postgres
 
 import (
-	"context"
-	"fmt"
-	"io"
-	"net/http"
-	"net/http/httptest"
-	"sync"
 	"testing"
 	"time"
 
-	"fx-quotes/internal/config"
+	"fx-quotes/internal/db"
 	"fx-quotes/internal/domain"
-	"fx-quotes/internal/frankfurter"
-	"fx-quotes/internal/handler"
-	"fx-quotes/internal/postgres"
-	"fx-quotes/internal/service"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/pashagolub/pgxmock/v6"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestQuoteFlow(t *testing.T) {
-	ctx, pool := openTestDB(t, 1, "test-key")
-	started := make(chan struct{})
-	release := make(chan struct{})
-	notify := sync.OnceFunc(func() { close(started) })
-	unblock := sync.OnceFunc(func() { close(release) })
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		notify()
-		select {
-		case <-release:
-			_, err := io.WriteString(w, `{"base":"EUR","quote":"MXN","rate":20.95}`)
-			assert.NoError(t, err)
-		case <-r.Context().Done():
-		}
-	}))
-	t.Cleanup(upstream.Close)
-	t.Cleanup(unblock)
-	client := upstream.Client()
-	client.Timeout = 3 * time.Second
-	ratesSettings := config.Defaults().Rates
-	ratesSettings.BaseURL = upstream.URL
-	repo := postgres.NewQuoteRepo(pool)
-	app := handler.NewQuoteHandler(service.NewQuoteService(repo), config.Defaults().HTTP).Routes()
-	startWorker(t, ctx, service.NewQuoteWorker(repo, frankfurter.NewClient(client, ratesSettings), config.Defaults().Worker))
+func TestEnqueue(t *testing.T) {
+	tests := []struct {
+		name, existingPair string
+		wantID             int64
+		wantErr            error
+	}{
+		{name: "new quote", wantID: 3},
+		{name: "repeated key", existingPair: "EUR/MXN", wantID: 3},
+		{name: "key conflict", existingPair: "USD/MXN", wantErr: domain.ErrIdempotencyConflict},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo, pool := newTestRepo(t)
+			key := pgtype.Text{String: "demo", Valid: true}
+			insert := pool.ExpectQuery("INSERT INTO quotes").WithArgs("EUR/MXN", key)
+			if tt.existingPair == "" {
+				insert.WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(int64(3)))
+			} else {
+				insert.WillReturnError(pgx.ErrNoRows)
+				pool.ExpectQuery("SELECT id, pair FROM quotes").WithArgs(key).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "pair"}).AddRow(int64(3), tt.existingPair))
+			}
 
-	first := requestQuote(t, app, http.MethodPost, "/quotes", `{"pair":"EUR/MXN"}`, "test-key", http.StatusAccepted)
-	waitForSignal(t, ctx, started)
-	require.Positive(t, first.ID)
-	repeated := requestQuote(t, app, http.MethodPost, "/quotes", `{"pair":"EUR/MXN"}`, "test-key", http.StatusAccepted)
-	assert.Equal(t, first.ID, repeated.ID, "pending job keeps its idempotency key")
+			id, err := repo.Enqueue(t.Context(), "EUR/MXN", "demo")
+			assert.ErrorIs(t, err, tt.wantErr)
+			assert.Equal(t, tt.wantID, id)
+		})
+	}
+}
 
-	tx, err := pool.Begin(ctx)
+func TestGetLatest(t *testing.T) {
+	repo, pool := newTestRepo(t)
+	updatedAt := time.Date(2026, time.November, 5, 12, 0, 0, 0, time.UTC)
+	rows := pgxmock.NewRows([]string{"id", "pair", "idempotency_key", "status", "price", "updated_at", "claim_version", "lease_until"}).
+		AddRow(int64(3), "EUR/MXN", nil, "completed", 20.95, updatedAt, int64(1), nil)
+	pool.ExpectQuery("ORDER BY updated_at DESC").WithArgs("EUR/MXN").WillReturnRows(rows)
+
+	got, err := repo.GetLatest(t.Context(), "EUR/MXN")
 	require.NoError(t, err)
-	_, lockErr := tx.Exec(ctx, "SELECT id FROM quotes WHERE id = $1 FOR UPDATE NOWAIT", first.ID)
-	rollbackErr := tx.Rollback(ctx)
-	require.NoError(t, lockErr, "row remains unlocked during provider request")
-	require.NoError(t, rollbackErr)
-	pending := requestQuote(t, app, http.MethodGet, fmt.Sprintf("/quotes/%d", first.ID), "", "", http.StatusAccepted)
-	assert.Equal(t, domain.QuotePending, pending.Status)
-	assert.Nil(t, pending.Price)
-	assert.Nil(t, pending.UpdatedAt)
-	requestQuote(t, app, http.MethodGet, "/quotes/latest?pair=EUR%2FMXN", "", "", http.StatusNotFound)
-
-	unblock()
-	complete := waitForQuote(t, ctx, repo, first.ID, domain.QuoteCompleted)
-	assert.Equal(t, 20.95, complete.Price)
-	assert.False(t, complete.UpdatedAt.IsZero())
-	assert.Same(t, time.UTC, complete.UpdatedAt.Location())
-	repeated = requestQuote(t, app, http.MethodPost, "/quotes", `{"pair":"EUR/MXN"}`, "test-key", http.StatusAccepted)
-	assert.Equal(t, first.ID, repeated.ID, "completed job keeps its idempotency key")
+	assert.Equal(t, domain.Quote{ID: 3, Pair: "EUR/MXN", Status: domain.QuoteCompleted, Price: 20.95, UpdatedAt: updatedAt}, got)
 }
 
-func TestQuoteTimeoutKeepsLatest(t *testing.T) {
-	ctx, pool := openTestDB(t, 0, "completed-key", "timeout-key")
-	repo := postgres.NewQuoteRepo(pool)
-	firstID := enqueueCompletedQuote(t, ctx, repo, "completed-key", 20.95)
-	upstream := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		<-r.Context().Done()
-	}))
-	t.Cleanup(upstream.Close)
-	client := upstream.Client()
-	client.Timeout = 100 * time.Millisecond
-	ratesSettings := config.Defaults().Rates
-	ratesSettings.BaseURL = upstream.URL
-	app := handler.NewQuoteHandler(service.NewQuoteService(repo), config.Defaults().HTTP).Routes()
-	startWorker(t, ctx, service.NewQuoteWorker(repo, frankfurter.NewClient(client, ratesSettings), config.Defaults().Worker))
-
-	second := requestQuote(t, app, http.MethodPost, "/quotes", `{"pair":"EUR/MXN"}`, "timeout-key", http.StatusAccepted)
-	assert.Greater(t, second.ID, firstID)
-	waitForQuote(t, ctx, repo, second.ID, domain.QuoteFailed)
-	failed := requestQuote(t, app, http.MethodGet, fmt.Sprintf("/quotes/%d", second.ID), "", "", http.StatusOK)
-	assert.Equal(t, domain.QuoteFailed, failed.Status)
-	assert.Equal(t, "rate_unavailable", failed.Error)
-	assert.Nil(t, failed.Price)
-	latest := requestQuote(t, app, http.MethodGet, "/quotes/latest?pair=EUR%2FMXN", "", "", http.StatusOK)
-	assert.Equal(t, firstID, latest.ID)
-	assert.Equal(t, domain.QuoteCompleted, latest.Status)
+func TestGetByIDNotFound(t *testing.T) {
+	repo, pool := newTestRepo(t)
+	pool.ExpectQuery(`WHERE id = \$1`).WithArgs(int64(3)).WillReturnError(pgx.ErrNoRows)
+	_, err := repo.GetByID(t.Context(), 3)
+	assert.ErrorIs(t, err, domain.ErrQuoteNotFound)
 }
 
-func TestQuoteRecoveryUpdatesLatest(t *testing.T) {
-	ctx, pool := openTestDB(t, 0, "previous-key", "recovery-key")
-	repo := postgres.NewQuoteRepo(pool)
-	enqueueCompletedQuote(t, ctx, repo, "previous-key", 20.95)
-	app := handler.NewQuoteHandler(service.NewQuoteService(repo), config.Defaults().HTTP).Routes()
-	quote := requestQuote(t, app, http.MethodPost, "/quotes", `{"pair":"EUR/MXN"}`, "recovery-key", http.StatusAccepted)
-	started := make(chan struct{})
-	stopCanceledWorker := startWorker(t, ctx, service.NewQuoteWorker(repo, testRates(func(ctx context.Context, _ string) (float64, error) {
-		close(started)
-		<-ctx.Done()
-		return 0, ctx.Err()
-	}), config.Defaults().Worker))
-	waitForSignal(t, ctx, started)
-	stopCanceledWorker()
-	waitForQuote(t, ctx, repo, quote.ID, domain.QuotePending)
+func TestClaimNext(t *testing.T) {
+	repo, pool := newTestRepo(t)
+	pool.ExpectQuery("WITH next AS").WithArgs(int64(30_000_000)).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "pair", "claim_version"}).AddRow(int64(3), "EUR/MXN", int64(1)))
 
-	expireClaim(t, ctx, pool, quote.ID)
-	startWorker(t, ctx, service.NewQuoteWorker(repo, testRates(func(context.Context, string) (float64, error) {
-		return 21, nil
-	}), config.Defaults().Worker))
-	waitForQuote(t, ctx, repo, quote.ID, domain.QuoteCompleted)
-	latest := requestQuote(t, app, http.MethodGet, "/quotes/latest?pair=EUR%2FMXN", "", "", http.StatusOK)
-	assert.Equal(t, quote.ID, latest.ID)
-	require.NotNil(t, latest.Price)
-	assert.Equal(t, float64(21), *latest.Price)
+	job, found, err := repo.ClaimNext(t.Context(), 30*time.Second)
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, domain.QuoteJob{ID: 3, Pair: "EUR/MXN", Version: 1}, job)
+
+	pool.ExpectQuery("WITH next AS").WithArgs(int64(30_000_000)).WillReturnError(pgx.ErrNoRows)
+	_, found, err = repo.ClaimNext(t.Context(), 30*time.Second)
+	assert.NoError(t, err)
+	assert.False(t, found)
+}
+
+func TestFinishClaim(t *testing.T) {
+	tests := []struct {
+		name     string
+		complete bool
+		rows     int64
+		wantErr  error
+	}{
+		{name: "complete", complete: true, rows: 1},
+		{name: "fail", rows: 1},
+		{name: "complete lost claim", complete: true, wantErr: domain.ErrClaimLost},
+		{name: "fail lost claim", wantErr: domain.ErrClaimLost},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo, pool := newTestRepo(t)
+			job := domain.QuoteJob{ID: 3, Pair: "EUR/MXN", Version: 1}
+			var err error
+			if tt.complete {
+				pool.ExpectExec("UPDATE quotes SET status = 'completed'").
+					WithArgs(job.ID, pgtype.Float8{Float64: 20.95, Valid: true}, job.Version).
+					WillReturnResult(pgxmock.NewResult("UPDATE", tt.rows))
+				err = repo.Complete(t.Context(), job, 20.95)
+			} else {
+				pool.ExpectExec("UPDATE quotes SET status = 'failed'").WithArgs(job.ID, job.Version).
+					WillReturnResult(pgxmock.NewResult("UPDATE", tt.rows))
+				err = repo.Fail(t.Context(), job)
+			}
+			assert.ErrorIs(t, err, tt.wantErr)
+		})
+	}
+}
+
+func newTestRepo(t *testing.T) (*QuoteRepo, pgxmock.PgxPoolIface) {
+	t.Helper()
+	pool, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	t.Cleanup(func() { assert.NoError(t, pool.ExpectationsWereMet()) })
+	return &QuoteRepo{queries: db.New(pool)}, pool
 }

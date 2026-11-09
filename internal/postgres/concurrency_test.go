@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -42,6 +43,7 @@ func TestConcurrentUpdates(t *testing.T) {
 		t.Fatal("use a dedicated test database with an empty quotes table")
 	}
 	var unkeyedIDs []int64
+	var keyedID int64
 	defer func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -102,20 +104,21 @@ func TestConcurrentUpdates(t *testing.T) {
 			}
 			id = result.id
 		}
+		keyedID = id
 		requestQuote(t, app, http.MethodPost, "/quotes", `{"pair":"USD/MXN"}`, "concurrency-key", http.StatusConflict)
 	})
 
-	for {
-		processed, err := processNext(ctx, repo, func(context.Context, string) (float64, error) { return 20, nil })
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !processed {
-			break
-		}
+	stopDrainWorker := startWorker(ctx, service.NewQuoteWorker(repo, testRates(func(context.Context, string) (float64, error) {
+		return 20, nil
+	}), config.Defaults().Worker))
+	defer stopDrainWorker()
+	for _, id := range unkeyedIDs {
+		waitForQuote(t, ctx, repo, id, domain.QuoteCompleted)
 	}
+	waitForQuote(t, ctx, repo, keyedID, domain.QuoteCompleted)
+	stopDrainWorker()
 
-	t.Run("processors skip a claimed job without processing it twice", func(t *testing.T) {
+	t.Run("workers skip a claimed job without processing it twice", func(t *testing.T) {
 		first, err := repo.Enqueue(ctx, "EUR/USD", "concurrency-first")
 		if err != nil {
 			t.Fatal(err)
@@ -125,57 +128,51 @@ func TestConcurrentUpdates(t *testing.T) {
 			t.Fatal(err)
 		}
 		attempt, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
 		started := make(chan struct{})
 		release := make(chan struct{})
 		unblock := sync.OnceFunc(func() { close(release) })
-		done := make(chan struct{})
-		firstResult := make(chan error, 1)
-		go func() {
-			defer close(done)
-			processed, err := processNext(attempt, repo, func(ctx context.Context, pair string) (float64, error) {
-				if pair != "EUR/USD" {
-					return 0, fmt.Errorf("first processor picked %s", pair)
-				}
-				close(started)
-				select {
-				case <-release:
-					return 1.1, nil
-				case <-ctx.Done():
-					return 0, ctx.Err()
-				}
-			})
-			if err == nil && !processed {
-				err = fmt.Errorf("first processor did not commit its job")
+		defer unblock()
+		var firstCalls, secondCalls atomic.Int32
+		stopFirstWorker := startWorker(attempt, service.NewQuoteWorker(repo, testRates(func(ctx context.Context, pair string) (float64, error) {
+			if pair != "EUR/USD" {
+				return 0, fmt.Errorf("first worker picked %s", pair)
 			}
-			firstResult <- err
-		}()
-		defer func() { cancel(); unblock(); <-done }()
+			if firstCalls.Add(1) == 1 {
+				close(started)
+			}
+			select {
+			case <-release:
+				return 1.1, nil
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			}
+		}), config.Defaults().Worker))
+		defer stopFirstWorker()
 		select {
 		case <-started:
 		case <-attempt.Done():
-			t.Fatal("first processor did not claim its job")
+			t.Fatal("first worker did not claim its job")
 		}
-		processed, err := processNext(attempt, repo, func(_ context.Context, pair string) (float64, error) {
+		stopSecondWorker := startWorker(attempt, service.NewQuoteWorker(repo, testRates(func(_ context.Context, pair string) (float64, error) {
+			secondCalls.Add(1)
 			if pair != "USD/MXN" {
-				return 0, fmt.Errorf("second processor picked claimed pair %s", pair)
+				return 0, fmt.Errorf("second worker picked claimed pair %s", pair)
 			}
 			return 20, nil
-		})
-		if err != nil || !processed {
-			t.Fatalf("second processor failed to skip the claimed job: %v", err)
-		}
+		}), config.Defaults().Worker))
+		defer stopSecondWorker()
 		waitForQuote(t, attempt, repo, second, domain.QuoteCompleted)
-		processed, err = processNext(attempt, repo, func(context.Context, string) (float64, error) {
-			t.Error("already claimed jobs must not be fetched again")
-			return 0, nil
-		})
-		if err != nil || processed {
-			t.Fatalf("expected no available jobs, processed=%t, error=%v", processed, err)
+		stopSecondWorker()
+		waitForQuote(t, attempt, repo, first, domain.QuotePending)
+		if _, found, err := repo.ClaimNext(attempt, config.Defaults().Worker.Lease); err != nil || found {
+			t.Fatalf("expected no available jobs, found=%t, error=%v", found, err)
 		}
 		unblock()
-		if err := <-firstResult; err != nil {
-			t.Fatal(err)
-		}
 		waitForQuote(t, attempt, repo, first, domain.QuoteCompleted)
+		stopFirstWorker()
+		if firstCalls.Load() != 1 || secondCalls.Load() != 1 {
+			t.Fatalf("provider calls: first=%d, second=%d; want one each", firstCalls.Load(), secondCalls.Load())
+		}
 	})
 }

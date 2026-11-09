@@ -49,7 +49,7 @@ func run(ctx context.Context) error {
 
 	quotes := postgres.NewQuoteRepo(pool)
 	quoteService := service.NewQuoteService(quotes)
-	rates := frankfurter.NewClient(cfg.Rates.BaseURL, &http.Client{Timeout: cfg.Rates.Timeout}, cfg.Rates)
+	rates := frankfurter.NewClient(&http.Client{Timeout: cfg.Rates.Timeout}, cfg.Rates)
 	worker := service.NewQuoteWorker(quotes, rates, cfg.Worker)
 
 	server := &http.Server{

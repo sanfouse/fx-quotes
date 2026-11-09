@@ -19,8 +19,8 @@ type Client struct {
 	settings   config.RatesConfig
 }
 
-func NewClient(baseURL string, client *http.Client, settings config.RatesConfig) *Client {
-	return &Client{baseURL: strings.TrimRight(baseURL, "/"), httpClient: client, settings: settings}
+func NewClient(client *http.Client, settings config.RatesConfig) *Client {
+	return &Client{baseURL: strings.TrimRight(settings.BaseURL, "/"), httpClient: client, settings: settings}
 }
 
 func (r *Client) getRate(ctx context.Context, pair string) (float64, error) {

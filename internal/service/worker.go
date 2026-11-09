@@ -31,13 +31,10 @@ func NewQuoteWorker(queue quoteQueue, rates rateProvider, settings config.Worker
 
 func (w *QuoteWorker) Run(ctx context.Context) {
 	for ctx.Err() == nil {
-		attempt, cancel := context.WithTimeout(ctx, w.settings.AttemptTimeout)
-		processed, err := w.processNext(attempt)
+		attemptCtx, cancel := context.WithTimeout(ctx, w.settings.AttemptTimeout)
+		processed, err := w.processNext(attemptCtx)
 		cancel()
 
-		if ctx.Err() != nil {
-			return
-		}
 		if err != nil {
 			slog.Error("process quote", "error", err)
 		} else if processed {

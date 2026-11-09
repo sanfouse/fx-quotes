@@ -23,7 +23,7 @@ func TestQuoteRoutes(t *testing.T) {
 		name, method, path, body, key string
 		omitKey                       bool
 		status                        int
-		response, location            string
+		response, location, allow     string
 	}{
 		{name: "accepted", method: "POST", path: "/quotes", body: `{"pair":" eur/mxn "}`, key: "demo", status: 202, response: `{"id":3}`, location: "/quotes/3"},
 		{name: "malformed", method: "POST", path: "/quotes", body: `{"pair":`, key: "demo", status: 400, response: `{"error":"invalid_request"}`},
@@ -45,7 +45,9 @@ func TestQuoteRoutes(t *testing.T) {
 		{name: "latest with uppercase and trailing slash", method: "GET", path: "/QUOTES/LATEST/?pair=EUR%2FMXN", status: 404, response: `{"error":"Not Found"}`},
 		{name: "latest missing", method: "GET", path: "/quotes/latest?pair=USD%2FMXN", status: 404, response: `{"error":"not_found"}`},
 		{name: "pair missing", method: "GET", path: "/quotes/latest", status: 400, response: `{"error":"invalid_request"}`},
-		{name: "unsupported method", method: "POST", path: "/quotes/latest", status: 405, response: `{"error":"Method Not Allowed"}`},
+		{name: "unsupported method", method: "POST", path: "/quotes/latest", status: 405, response: `{"error":"Method Not Allowed"}`, allow: "GET"},
+		{name: "get enqueue", method: "GET", path: "/quotes", status: 405, response: `{"error":"Method Not Allowed"}`, allow: "POST"},
+		{name: "head quote", method: "HEAD", path: "/quotes/3", status: 405, response: `{"error":"Method Not Allowed"}`, allow: "GET"},
 		{name: "unknown path", method: "GET", path: "/quotes/3/extra", status: 404, response: `{"error":"Not Found"}`},
 	}
 	for _, tc := range cases {
@@ -63,6 +65,9 @@ func TestQuoteRoutes(t *testing.T) {
 			defer func() { _ = resp.Body.Close() }()
 			if resp.StatusCode != tc.status || resp.Header.Get("Location") != tc.location {
 				t.Errorf("got status %d, Location %q, want %d, %q", resp.StatusCode, resp.Header.Get("Location"), tc.status, tc.location)
+			}
+			if got := resp.Header.Get("Allow"); got != tc.allow {
+				t.Errorf("Allow = %q, want %q", got, tc.allow)
 			}
 
 			var got, want map[string]any

@@ -50,7 +50,9 @@ func TestGetRateWithRetry(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			rates := NewClient(server.URL+"/provider/", server.Client(), config.Defaults().Rates)
+			settings := config.Defaults().Rates
+			settings.BaseURL = server.URL + "/provider/"
+			rates := NewClient(server.Client(), settings)
 			got, err := rates.GetRate(t.Context(), "EUR/MXN")
 			if got != tc.want || (err != nil) != (tc.want == 0) {
 				t.Errorf("got rate %v, error %v, want rate %v", got, err, tc.want)
@@ -71,7 +73,9 @@ func TestGetRateTimeout(t *testing.T) {
 	defer server.Close()
 	httpClient := server.Client()
 	httpClient.Timeout = 100 * time.Millisecond
-	rates := NewClient(server.URL, httpClient, config.Defaults().Rates)
+	settings := config.Defaults().Rates
+	settings.BaseURL = server.URL
+	rates := NewClient(httpClient, settings)
 	if _, err := rates.GetRate(t.Context(), "EUR/MXN"); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("got %v, want deadline exceeded", err)
 	}

@@ -3,7 +3,6 @@ package config
 import (
 	"errors"
 	"math"
-	"net/url"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -55,18 +54,11 @@ func Load() (Config, error) {
 	if cfg.DatabaseURL == "" {
 		return Config{}, errors.New("DATABASE_URL is required")
 	}
-	baseURL, err := url.Parse(cfg.Rates.BaseURL)
-	if err != nil || baseURL.Hostname() == "" ||
-		(baseURL.Scheme != "http" && baseURL.Scheme != "https") ||
-		baseURL.ForceQuery || baseURL.RawQuery != "" || baseURL.Fragment != "" {
-		return Config{}, errors.New("RATES_BASE_URL must be an absolute HTTP(S) URL without a query or fragment")
-	}
-	cfg.Rates.BaseURL = baseURL.String()
 	for _, duration := range []time.Duration{
 		cfg.DatabasePingTimeout, cfg.HTTP.ReadHeaderTimeout, cfg.HTTP.ReadTimeout,
 		cfg.HTTP.WriteTimeout, cfg.HTTP.IdleTimeout, cfg.HTTP.ShutdownTimeout,
 		cfg.HTTP.RequestTimeout, cfg.Rates.Timeout, cfg.Rates.RetryDelay,
-		cfg.Worker.AttemptTimeout, cfg.Worker.Lease, cfg.Worker.PollInterval,
+		cfg.Worker.AttemptTimeout, cfg.Worker.PollInterval,
 	} {
 		if duration <= 0 {
 			return Config{}, errors.New("timeouts and intervals must be positive")

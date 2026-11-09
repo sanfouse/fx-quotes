@@ -3,7 +3,6 @@ package postgres_test
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -85,14 +84,11 @@ func TestQuoteFlow(t *testing.T) {
 
 	repo := postgres.NewQuoteRepo(pool)
 	app := handler.NewQuoteHandler(service.NewQuoteService(repo), config.Defaults().HTTP).Routes()
-	worker := service.NewQuoteWorker(repo, frankfurter.NewClient(upstream.URL, client, config.Defaults().Rates), config.Defaults().Worker)
-	workerCtx, stopWorker := context.WithCancel(ctx)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		worker.Run(workerCtx)
-	}()
-	defer func() { stopWorker(); <-done }()
+	ratesSettings := config.Defaults().Rates
+	ratesSettings.BaseURL = upstream.URL
+	worker := service.NewQuoteWorker(repo, frankfurter.NewClient(client, ratesSettings), config.Defaults().Worker)
+	stopWorker := startWorker(ctx, worker)
+	defer stopWorker()
 
 	post := func(key string) dto.QuoteResponse {
 		return requestQuote(t, app, http.MethodPost, "/quotes", `{"pair":"EUR/MXN"}`, key, http.StatusAccepted)
@@ -147,25 +143,29 @@ func TestQuoteFlow(t *testing.T) {
 	}
 
 	stopWorker()
-	<-done
 
 	third := post("recovery-key")
-	attempt, stopAttempt := context.WithCancel(ctx)
-	defer stopAttempt()
-	if _, err := processNext(attempt, repo, func(context.Context, string) (float64, error) {
-		stopAttempt()
-		return 0, context.Canceled
-	}); !errors.Is(err, context.Canceled) {
-		t.Fatalf("got %v, want context.Canceled", err)
+	fetchStarted := make(chan struct{})
+	stopCancelledWorker := startWorker(ctx, service.NewQuoteWorker(repo, testRates(func(ctx context.Context, _ string) (float64, error) {
+		close(fetchStarted)
+		<-ctx.Done()
+		return 0, ctx.Err()
+	}), config.Defaults().Worker))
+	defer stopCancelledWorker()
+	select {
+	case <-fetchStarted:
+	case <-ctx.Done():
+		t.Fatal("worker did not claim the job before cancellation")
 	}
+	stopCancelledWorker()
 	waitForQuote(t, ctx, repo, third.ID, domain.QuotePending)
 	if _, err := pool.Exec(ctx, "UPDATE quotes SET lease_until = clock_timestamp() - interval '1 second' WHERE id = $1", third.ID); err != nil {
 		t.Fatal(err)
 	}
-	processed, err := processNext(ctx, repo, func(context.Context, string) (float64, error) { return 21, nil })
-	if err != nil || !processed {
-		t.Fatalf("could not process recovered job: %v", err)
-	}
+	stopRecoveryWorker := startWorker(ctx, service.NewQuoteWorker(repo, testRates(func(context.Context, string) (float64, error) {
+		return 21, nil
+	}), config.Defaults().Worker))
+	defer stopRecoveryWorker()
 	waitForQuote(t, ctx, repo, third.ID, domain.QuoteCompleted)
 	latest = requestQuote(t, app, http.MethodGet, latestPath, "", "", http.StatusOK)
 	if latest.ID != third.ID || latest.Price == nil || *latest.Price != 21 {
@@ -217,19 +217,21 @@ func waitForQuote(t *testing.T, ctx context.Context, repo *postgres.QuoteRepo, i
 	}
 }
 
-func processNext(ctx context.Context, repo *postgres.QuoteRepo, fetch func(context.Context, string) (float64, error)) (bool, error) {
-	job, found, err := repo.ClaimNext(ctx, 30*time.Second)
-	if err != nil || !found {
-		return false, err
+type testRates func(context.Context, string) (float64, error)
+
+func (f testRates) GetRate(ctx context.Context, pair string) (float64, error) {
+	return f(ctx, pair)
+}
+
+func startWorker(ctx context.Context, worker *service.QuoteWorker) func() {
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		worker.Run(ctx)
+	}()
+	return func() {
+		cancel()
+		<-done
 	}
-	price, fetchErr := fetch(ctx, job.Pair)
-	if err := ctx.Err(); err != nil {
-		return false, err
-	}
-	if fetchErr != nil {
-		err = repo.Fail(ctx, job)
-	} else {
-		err = repo.Complete(ctx, job, price)
-	}
-	return err == nil, err
 }

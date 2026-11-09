@@ -61,9 +61,6 @@ func (r *QuoteRepo) GetLatest(ctx context.Context, pair string) (domain.Quote, e
 }
 
 func (r *QuoteRepo) ClaimNext(ctx context.Context, lease time.Duration) (domain.QuoteJob, bool, error) {
-	if lease.Microseconds() <= 0 {
-		return domain.QuoteJob{}, false, fmt.Errorf("quote lease must be positive")
-	}
 	row, err := r.queries.ClaimNextQuote(ctx, lease.Microseconds())
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.QuoteJob{}, false, nil

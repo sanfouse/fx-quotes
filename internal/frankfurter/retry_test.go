@@ -44,7 +44,7 @@ func TestRetryPreservesCause(t *testing.T) {
 					calls++
 					return tt.transport(req)
 				})}
-				rates := NewClient("https://example.com", client, config.Defaults().Rates)
+				rates := NewClient(client, config.Defaults().Rates)
 				if _, err := rates.GetRate(t.Context(), "EUR/MXN"); !errors.Is(err, cause) {
 					t.Fatalf("got %v, want original error %v", err, cause)
 				}
@@ -64,7 +64,7 @@ func TestRetryCanceledBeforeRequest(t *testing.T) {
 		calls++
 		return nil, errors.New("unexpected request")
 	})}
-	rates := NewClient("https://example.com", client, config.Defaults().Rates)
+	rates := NewClient(client, config.Defaults().Rates)
 	if _, err := rates.GetRate(ctx, "EUR/MXN"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("got %v, want context canceled", err)
 	}
@@ -82,7 +82,7 @@ func TestRetryCanceledDuringDelay(t *testing.T) {
 			calls.Add(1)
 			return nil, errors.New("connection lost")
 		})}
-		rates := NewClient("https://example.com", client, config.Defaults().Rates)
+		rates := NewClient(client, config.Defaults().Rates)
 		done := make(chan error, 1)
 		go func() {
 			_, err := rates.GetRate(ctx, "EUR/MXN")
@@ -110,7 +110,7 @@ func TestConfiguredRetries(t *testing.T) {
 			return nil, errors.New("connection lost")
 		})}
 		started := time.Now()
-		if _, err := NewClient("https://example.com", client, settings).GetRate(t.Context(), "EUR/MXN"); err == nil {
+		if _, err := NewClient(client, settings).GetRate(t.Context(), "EUR/MXN"); err == nil {
 			t.Fatal("expected provider error")
 		}
 		if calls != settings.MaxAttempts || time.Since(started) != settings.RetryDelay {

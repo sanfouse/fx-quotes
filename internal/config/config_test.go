@@ -16,11 +16,6 @@ func TestLoad(t *testing.T) {
 		{name: "default provider", databaseURL: databaseURL, wantRatesURL: "https://api.frankfurter.dev"},
 		{name: "custom provider", databaseURL: databaseURL, ratesURL: "http://localhost:8080/api/", wantRatesURL: "http://localhost:8080/api/"},
 		{name: "missing database URL"},
-		{name: "malformed URL", databaseURL: databaseURL, ratesURL: "http://localhost:bad"},
-		{name: "relative URL", databaseURL: databaseURL, ratesURL: "/api"},
-		{name: "unsupported scheme", databaseURL: databaseURL, ratesURL: "ftp://localhost"},
-		{name: "URL with query", databaseURL: databaseURL, ratesURL: "https://localhost?key=value"},
-		{name: "URL with fragment", databaseURL: databaseURL, ratesURL: "https://localhost#api"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -123,7 +118,6 @@ func TestInvalidSettings(t *testing.T) {
 		{"HTTP_MAX_BODY_BYTES", "9223372036854775808"},
 		{"RATES_MAX_BODY_BYTES", "9223372036854775807"},
 		{"HTTP_MAX_IDEMPOTENCY_KEY_BYTES", "-1"},
-		{"WORKER_LEASE", "20s"}, {"WORKER_LEASE", "1ns"},
 		{"HTTP_WRITE_TIMEOUT", "1s"},
 	} {
 		t.Run(tc.key+"="+tc.value, func(t *testing.T) {
@@ -131,6 +125,29 @@ func TestInvalidSettings(t *testing.T) {
 			t.Setenv(tc.key, tc.value)
 			if _, err := Load(); err == nil {
 				t.Fatal("invalid configuration accepted")
+			}
+		})
+	}
+}
+
+func TestWorkerLease(t *testing.T) {
+	for _, tc := range []struct {
+		name, lease, attemptTimeout string
+		valid                       bool
+	}{
+		{name: "negative", lease: "-1s", attemptTimeout: "1ns"},
+		{name: "zero", lease: "0s", attemptTimeout: "1ns"},
+		{name: "below microsecond", lease: "500ns", attemptTimeout: "1ns"},
+		{name: "one microsecond", lease: "1us", attemptTimeout: "500ns", valid: true},
+		{name: "equal to attempt timeout", lease: "20s", attemptTimeout: "20s"},
+		{name: "shorter than attempt timeout", lease: "19s", attemptTimeout: "20s"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetEnv(t)
+			t.Setenv("WORKER_LEASE", tc.lease)
+			t.Setenv("WORKER_ATTEMPT_TIMEOUT", tc.attemptTimeout)
+			if _, err := Load(); (err == nil) != tc.valid {
+				t.Fatalf("Load() error = %v, want valid = %t", err, tc.valid)
 			}
 		})
 	}

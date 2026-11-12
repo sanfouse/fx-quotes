@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"fx-quotes/internal/config"
@@ -30,6 +31,14 @@ func NewQuoteWorker(queue quoteQueue, rates rateProvider, settings config.Worker
 }
 
 func (w *QuoteWorker) Run(ctx context.Context) {
+	var running sync.WaitGroup
+	for range w.settings.Count {
+		running.Go(func() { w.runWorker(ctx) })
+	}
+	running.Wait()
+}
+
+func (w *QuoteWorker) runWorker(ctx context.Context) {
 	for ctx.Err() == nil {
 		attemptCtx, cancel := context.WithTimeout(ctx, w.settings.AttemptTimeout)
 		processed, err := w.processNext(attemptCtx)

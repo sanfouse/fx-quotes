@@ -63,6 +63,7 @@ func run(ctx context.Context) error {
 	runCtx, stop := context.WithCancel(ctx)
 	defer stop()
 	var running sync.WaitGroup
+	slog.Info("start quote workers", "count", cfg.Worker.Count)
 	running.Go(func() { worker.Run(runCtx) })
 
 	addr := fmt.Sprintf(":%d", cfg.HTTP.Port)

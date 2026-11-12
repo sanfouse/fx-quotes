@@ -28,6 +28,7 @@ type RatesConfig struct {
 }
 
 type WorkerConfig struct {
+	Count          int           `env:"COUNT" envDefault:"1"`
 	AttemptTimeout time.Duration `env:"ATTEMPT_TIMEOUT" envDefault:"20s"`
 	Lease          time.Duration `env:"LEASE" envDefault:"30s"`
 	PollInterval   time.Duration `env:"POLL_INTERVAL" envDefault:"500ms"`
@@ -73,6 +74,9 @@ func Load() (Config, error) {
 	}
 	if cfg.HTTP.MaxIdempotencyKeyBytes <= 0 || cfg.Rates.MaxAttempts <= 0 {
 		return Config{}, errors.New("HTTP_MAX_IDEMPOTENCY_KEY_BYTES and RATES_MAX_ATTEMPTS must be positive")
+	}
+	if cfg.Worker.Count <= 0 {
+		return Config{}, errors.New("WORKER_COUNT must be positive")
 	}
 	if cfg.Worker.Lease.Microseconds() <= 0 || cfg.Worker.Lease <= cfg.Worker.AttemptTimeout {
 		return Config{}, errors.New("WORKER_LEASE must be at least 1us and longer than WORKER_ATTEMPT_TIMEOUT")
